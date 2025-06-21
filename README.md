@@ -59,7 +59,7 @@ python3 dnsfuzzer.py <IP_SERVIDOR> \
 ## Ejemplo
 
 ```bash
-python3 dnsfuzzer.py 1.1.1.1 -d tunelko.com -n 200 -t 1.5 -o resultados.csv
+python3 dnsfuzzer.py 1.1.1.1 -d google.es -n 200 -t 1.5 -o resultados.csv
 ```
 
 ## Interpretación de resultados

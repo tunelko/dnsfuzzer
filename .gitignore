@@ -81,3 +81,5 @@ Thumbs.db
 *.swp
 *.swo
 
+cmd.sh
+resultados*.csv

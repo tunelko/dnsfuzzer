@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-DNS Fuzzer para detección de anomalías.
-Utiliza Scapy para generar consultas DNS aleatorias contra un servidor,
-analiza las respuestas (código de respuesta, bit AA, número de registros, tipo y TTL de los RR, contenido de TXT), 
-aplica un análisis estadístico de latencias para identificar respuestas inusuales y registra todos los resultados en un fichero CSV.
+DNS Fuzzer for anomaly detection.
+Uses Scapy to generate random DNS queries against a server,
+analyzes responses (response code, AA bit, RA bit, record count, RR type and TTL, TXT content),
+applies statistical analysis of latencies, performs retransmissions on timeouts,
+executes DNSSEC record queries, and logs all results to CSV and optionally to a PCAP file.
 """
 import random
 import string
@@ -13,9 +15,9 @@ import logging
 import statistics
 import re
 import csv
-from scapy.all import IP, UDP, DNS, DNSQR, DNSRR, sr1
+from scapy.all import IP, UDP, DNS, DNSQR, DNSRR, sr1, wrpcap
 
-# Configuración de logging
+# Logging configuration
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO
 )
@@ -23,27 +25,30 @@ logger = logging.getLogger("dns_fuzzer")
 
 
 class DNSFuzzer:
-    TTL_THRESHOLD = 3600  # TTL máximo aceptable en segundos
+    TTL_THRESHOLD = 3600  # Maximum acceptable TTL in seconds
+    LOW_TTL_THRESHOLD = 10  # Minimum TTL threshold for anomaly
 
     def __init__(
-        self, target_ip, base_domain, port=53, timeout=2, iterations=100, outfile=None
+        self,
+        target_ip,
+        base_domain,
+        port=53,
+        timeout=2,
+        iterations=100,
+        outfile=None,
+        pcap=None,
     ):
-        """
-        :param target_ip: IP del servidor DNS a testear
-        :param base_domain: Dominio para la consulta de baseline
-        :param port: Puerto UDP (por defecto 53)
-        :param timeout: Tiempo de espera para respuesta en segundos
-        :param iterations: Número de paquetes de fuzzing a enviar
-        :param outfile: Ruta de fichero CSV para guardar resultados
-        """
         self.target = target_ip
         self.base_domain = base_domain
         self.port = port
         self.timeout = timeout
         self.iterations = iterations
         self.outfile = outfile
+        self.pcap = pcap
         self.baseline = self._query_baseline()
-        self.times = []  # para análisis estadístico de tiempos
+        self.times = []  # For latency statistics
+        self.pcap_packets = []
+
         if self.outfile:
             with open(self.outfile, "w", newline="") as f:
                 writer = csv.writer(f)
@@ -55,7 +60,7 @@ class DNSFuzzer:
                         "duration",
                         "rcode",
                         "an_count",
-                        "anom",
+                        "anomalies",
                     ]
                 )
 
@@ -64,35 +69,46 @@ class DNSFuzzer:
         return f"{name}.com"
 
     def _random_qtype(self):
-        types = ["A", "AAAA", "MX", "NS", "TXT", "CNAME", "SOA"]
+        types = [
+            "A",
+            "AAAA",
+            "MX",
+            "NS",
+            "TXT",
+            "CNAME",
+            "SOA",
+            "DNSKEY",
+            "DS",
+            "RRSIG",
+            "NSEC",
+        ]
         return random.choice(types)
 
-    def _build_packet(self):
-        """paquete DNS"""
+    def _build_packet(self, qtype=None, domain=None):
         transaction_id = random.randint(0, 0xFFFF)
-        qname = self._random_domain()
-        qtype = self._random_qtype()
+        qname = domain or self._random_domain()
+        qt = qtype or self._random_qtype()
         pkt = (
             IP(dst=self.target)
             / UDP(dport=self.port)
-            / DNS(id=transaction_id, rd=1, qd=DNSQR(qname=qname, qtype=qtype))
+            / DNS(id=transaction_id, rd=1, qd=DNSQR(qname=qname, qtype=qt))
         )
-        return pkt, qtype
+        return pkt, qt
 
     def _query_baseline(self):
-        """guarda rcode, ancount y aa"""
-        pkt = (
-            IP(dst=self.target)
-            / UDP(dport=self.port)
-            / DNS(rd=1, qd=DNSQR(qname=self.base_domain, qtype="A"))
-        )
-        logger.info(f"Enviando consulta baseline a {self.base_domain}")
+        pkt, _ = self._build_packet(qtype="A", domain=self.base_domain)
+        logger.info(f"Sending baseline query to {self.base_domain}")
         resp = sr1(pkt, timeout=self.timeout, verbose=0)
         if not resp or DNS not in resp:
-            logger.warning("No se obtuvo respuesta baseline")
+            logger.warning("No baseline response received")
             return None
         dns = resp[DNS]
-        return {"rcode": dns.rcode, "an_count": dns.ancount, "aa": dns.aa}
+        return {
+            "rcode": dns.rcode,
+            "an_count": dns.ancount,
+            "aa": dns.aa,
+            "ra": dns.ra,
+        }
 
     def _log_csv(self, iteration, qtype, duration, dns, anomalies):
         if not self.outfile:
@@ -113,7 +129,7 @@ class DNSFuzzer:
 
     def fuzz(self):
         logger.info(
-            f"Iniciando fuzzing: {self.iterations} iteraciones contra {self.target} (baseline: {self.base_domain})"
+            f"Starting fuzzing: {self.iterations} iterations against {self.target} (baseline: {self.base_domain})"
         )
         for i in range(1, self.iterations + 1):
             pkt, qtype = self._build_packet()
@@ -121,76 +137,121 @@ class DNSFuzzer:
             resp = sr1(pkt, timeout=self.timeout, verbose=0)
             duration = time.time() - start
             self.times.append(duration)
-            anomalies = []
+
+            # Retransmission on timeout
+            if not resp:
+                logger.info(f"Iteration {i}: timeout, retrying")
+                resp = sr1(pkt, timeout=self.timeout, verbose=0)
+                anomalies = ["timeout_retransmit"]
+            else:
+                anomalies = []
+
+            # PCAP logging
+            if self.pcap:
+                self.pcap_packets.append(pkt)
+                if resp:
+                    self.pcap_packets.append(resp)
+
             dns = resp[DNS] if resp and DNS in resp else None
 
-            if not resp:
-                anomalies.append("timeout")
-            elif not dns:
+            if not dns:
                 anomalies.append("no_DNS_layer")
             else:
+                # Check NXDOMAIN
                 if dns.rcode == 3:
-                    logger.info(f"Iteración {i}: NXDOMAIN")
+                    logger.info(f"Iteration {i}: NXDOMAIN")
                 else:
+                    # Baseline comparisons
                     if self.baseline:
                         if dns.rcode != self.baseline["rcode"]:
                             anomalies.append(f"rcode:{dns.rcode}")
                         if dns.aa != self.baseline["aa"]:
                             anomalies.append(f"aa:{dns.aa}")
+                        if dns.ra != self.baseline["ra"]:
+                            anomalies.append(f"ra:{dns.ra}")
                         if dns.ancount > self.baseline["an_count"] + 5:
-                            anomalies.append(f"ancount:{dns.ancount}")
+                            anomalies.append(f"an_count:{dns.ancount}")
+                    # Latency anomaly
                     if len(self.times) >= 10:
                         m, s = statistics.mean(self.times), statistics.stdev(self.times)
                         if duration > m + 3 * s:
                             anomalies.append(f"slow:{duration:.3f}")
+                    # Record checks
                     if dns.ancount > 0:
+                        # Multiple record consistency
+                        ttls = []
+                        rdatas = []
                         rr = dns.an
-                        exp = pkt[DNSQR].qtype
-                        if hasattr(rr, "type") and rr.type != exp:
-                            anomalies.append(f"type:{rr.type}")
-                        if hasattr(rr, "ttl") and rr.ttl > self.TTL_THRESHOLD:
-                            anomalies.append(f"ttl:{rr.ttl}")
-                        if qtype == "TXT" and hasattr(rr, "rdata"):
-                            payload = (
-                                rr.rdata.decode(errors="ignore")
-                                if isinstance(rr.rdata, (bytes, bytearray))
-                                else str(rr.rdata)
-                            )
-                            if not re.match(r"^[\x20-\x7E]+$", payload):
-                                anomalies.append("txt_payload")
+                        # handle single vs multiple
+                        for j in range(dns.ancount):
+                            r = resp.an[j] if isinstance(resp.an, list) else resp.an
+                            if hasattr(r, "ttl"):
+                                ttls.append(r.ttl)
+                            if hasattr(r, "rdata"):
+                                rdatas.append(r.rdata)
+                            # Type mismatch
+                            exp = pkt[DNSQR].qtype
+                            if r.type != exp:
+                                anomalies.append(f"type:{r.type}")
+                            if r.ttl > self.TTL_THRESHOLD:
+                                anomalies.append(f"ttl_high:{r.ttl}")
+                            if r.ttl < self.LOW_TTL_THRESHOLD:
+                                anomalies.append(f"ttl_low:{r.ttl}")
+                            if qtype == "TXT" and hasattr(r, "rdata"):
+                                payload = (
+                                    r.rdata.decode(errors="ignore")
+                                    if isinstance(r.rdata, (bytes, bytearray))
+                                    else str(r.rdata)
+                                )
+                                if not re.match(r"^[\x20-\x7E]+$", payload):
+                                    anomalies.append("txt_payload")
+                        if len(set(ttls)) > 1:
+                            anomalies.append("ttl_inconsistent")
+                        if len(rdatas) != len(set(rdatas)):
+                            anomalies.append("duplicate_records")
+
             if anomalies:
-                logger.warning(f"Iteración {i}: Anomalías -> {', '.join(anomalies)}")
+                logger.warning(f"Iteration {i}: Anomalies -> {', '.join(anomalies)}")
             else:
                 status = "NXDOMAIN" if dns and dns.rcode == 3 else "OK"
-                logger.info(f"Iteración {i}: {status} ({duration:.2f}s)")
+                logger.info(f"Iteration {i}: {status} ({duration:.2f}s)")
+
             self._log_csv(i, qtype, duration, dns, anomalies)
+
+        # Save PCAP if requested
+        if self.pcap and self.pcap_packets:
+            logger.info(
+                f"Writing PCAP to {self.pcap} ({len(self.pcap_packets)} packets)"
+            )
+            wrpcap(self.pcap, self.pcap_packets)
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="DNS Fuzzer con detección avanzada de anomalías usando Scapy"
+        description="DNS Fuzzer with advanced anomaly detection using Scapy"
     )
-    parser.add_argument("target", help="IP del servidor DNS objetivo")
+    parser.add_argument("target", help="Target DNS server IP address")
     parser.add_argument(
         "-d",
         "--domain",
         dest="domain",
-        default="tudominio.com",
-        help="Dominio para consulta baseline (por defecto: tudominio.com)",
+        default="yourdomain.com",
+        help="Domain for baseline query (default: yourdomain.com)",
     )
     parser.add_argument(
-        "-n", "--iterations", type=int, default=100, help="Número de consultas a enviar"
+        "-n", "--iterations", type=int, default=100, help="Number of queries to send"
     )
     parser.add_argument(
         "-t",
         "--timeout",
         type=float,
         default=2.0,
-        help="Tiempo de espera por respuesta (s)",
+        help="Timeout for response (s)",
     )
-    parser.add_argument("-o", "--output", help="Fichero CSV para guardar resultados")
+    parser.add_argument("-o", "--output", help="CSV file to save results")
+    parser.add_argument("--pcap", help="Path to save PCAP file of DNS traffic")
     args = parser.parse_args()
 
     fuzzer = DNSFuzzer(
@@ -199,5 +260,6 @@ if __name__ == "__main__":
         iterations=args.iterations,
         timeout=args.timeout,
         outfile=args.output,
+        pcap=args.pcap,
     )
     fuzzer.fuzz()

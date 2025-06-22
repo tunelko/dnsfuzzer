@@ -1,79 +1,78 @@
 # DNS Fuzzer
 
-Herramienta en Python para realizar fuzzing de servidores DNS y detectar anomalías en sus respuestas.
+Python tool to perform DNS server fuzzing and detect anomalies in their responses.
 
-## Descripción
+## Description
 
-DNS Fuzzer envía consultas DNS generadas aleatoriamente a un servidor objetivo y analiza las respuestas para identificar comportamientos inusuales o potencialmente maliciosos.
+DNS Fuzzer sends randomly generated DNS queries to a target server and analyzes the responses to identify unusual or potentially malicious behavior.
 
-## Características
+## Features
 
-* **Baseline configurable**: usa un dominio de referencia para establecer valores de `RCODE`, `AA` y `ANCOUNT`.
-* **Generación aleatoria** de nombres de dominio y tipos de consulta (`A`, `AAAA`, `MX`, `NS`, `TXT`, `CNAME`, `SOA`).
-* Detección de anomalías en respuestas:
+* **Configurable baseline**: uses a reference domain to establish expected values for `RCODE`, `AA`, and `ANCOUNT`.
+* **Random generation** of domain names and query types (`A`, `AAAA`, `MX`, `NS`, `TXT`, `CNAME`, `SOA`).
+* Detection of anomalies in responses:
 
-  * Códigos de respuesta inesperados (`RCODE`).
-  * Variación en el bit de autoridad (`AA`).
-  * Diferencias en el número de registros (`ANCOUNT`).
-  * Latencias fuera de umbral (`µ + 3σ`).
-  * Tipos de RR distintos a los solicitados.
-  * TTL excesivo (> 3600 s).
-  * Contenido no imprimible en registros TXT.
-  * Respuestas sin capa DNS o timeouts.
-* **Salida opcional en CSV** para análisis posterior.
+  * Unexpected response codes (`RCODE`).
+  * Variation in the authority bit (`AA`).
+  * Differences in the number of records (`ANCOUNT`).
+  * Latencies beyond threshold (`µ + 3σ`).
+  * RR types different from those requested.
+  * Excessive TTL (> 3600 s).
+  * Non-printable content in TXT records.
+  * Responses missing DNS layer or with timeouts.
+* **Optional CSV output** for further analysis.
 
-## Requisitos
+## Requirements
 
 * Python 3.6+
 * [Scapy](https://scapy.net/)
 
-## Instalación
+## Installation
 
 ```bash
-# Crear y activar un entorno virtual (opcional)
+# Create and activate a virtual environment (optional)
 python3 -m venv venv
 source venv/bin/activate
 
-# Instalar dependencia
+# Install dependency
 pip install scapy
 ```
 
-## Uso
+## Usage
 
 ```bash
-python3 dnsfuzzer.py <IP_SERVIDOR> \
-    -d <DOMINIO_BASELINE> \
-    -n <ITERACIONES> \
+python3 dnsfuzzer.py <SERVER_IP> \
+    -d <BASELINE_DOMAIN> \
+    -n <ITERATIONS> \
     -t <TIMEOUT> \
-    -o <FICHERO_CSV>
+    -o <CSV_FILE>
 ```
 
-### Parámetros
+### Parameters
 
-* `IP_SERVIDOR`: dirección IP del DNS a testear.
-* `-d, --domain`: dominio para consulta baseline (por defecto `example.com`).
-* `-n, --iterations`: número de consultas (por defecto `100`).
-* `-t, --timeout`: tiempo de espera en segundos (por defecto `2.0`).
-* `-o, --output`: ruta de fichero CSV para guardar resultados.
+* `SERVER_IP`: IP address of the DNS server to test.
+* `-d, --domain`: domain for baseline query (default is `example.com`).
+* `-n, --iterations`: number of queries to send (default is `100`).
+* `-t, --timeout`: timeout in seconds (default is `2.0`).
+* `-o, --output`: path to the CSV file to save results.
 
-## Ejemplo
+## Example
 
 ```bash
-python3 dnsfuzzer.py 1.1.1.1 -d google.es -n 200 -t 1.5 -o resultados.csv
+python3 dnsfuzzer.py 1.1.1.1 -d google.es -n 200 -t 1.5 -o results.csv
 ```
 
-## Interpretación de resultados
+## Interpreting results
 
-* Las líneas `OK` indican respuestas coherentes con la baseline.
-* `NXDOMAIN` es esperado para dominios inexistentes.
-* `WARNING` destaca anomalías detalladas (código, latencia, TTL, etc.).
-* El CSV incluye columnas: `timestamp, iteration, qtype, duration, rcode, an_count, anom`.
+* `OK` lines indicate responses consistent with the baseline.
+* `NXDOMAIN` is expected for nonexistent domains.
+* `WARNING` highlights detailed anomalies (code, latency, TTL, etc.).
+* The CSV includes columns: `timestamp, iteration, qtype, duration, rcode, an_count, anom`.
 
-## Contribuciones
+## Contributions
 
-Si quieres, abre pull requests o issues para mejoras o correcciones.
+Feel free to open pull requests or issues for improvements or fixes.
 
-## Licencia
+## License
 
 MIT License
-

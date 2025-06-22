@@ -81,5 +81,9 @@ Thumbs.db
 *.swp
 *.swo
 
+# Miscellaneous
 cmd.sh
 resultados*.csv
+
+# PCAP captures
+*.pcap
